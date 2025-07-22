@@ -1,0 +1,36 @@
+Multi-Plate Experimental Protocol
+
+General Conditions:
+- All plates processed simultaneously
+- Base temperature: 37 degrees
+- Measurement wavelength: 450nm
+
+Plate ID 1 Specific Conditions:
+- Experimental condition 1 applied to rows 1-4
+- Experimental condition 2 applied to rows 5-8
+- Treatment duration: 24 hours
+- Sample type: Type A organisms
+
+Plate ID 2 Specific Conditions:
+- Experimental condition 3 applied to entire plate
+- Variable temperature protocol: 30-40 degrees cycling
+- Treatment duration: 36 hours
+- Sample type: Type B organisms
+
+Plate ID 3 Specific Conditions:
+- Gradient condition across rows
+- Row A-D: Low intensity treatment
+- Row E-H: High intensity treatment
+- Treatment duration: 48 hours
+- Sample type: Mixed population
+
+Cross-Plate Comparisons:
+- Plates 1 and 2: Direct comparison of condition effects
+- Plate 3: Control reference for gradient studies
+- All blanks in column 12 for background subtraction
+
+Data Collection Notes:
+- Measurements taken every 6 hours
+- Shake before reading: 5 seconds
+- Settle time: 10 seconds
+- Number of reads per well: 3

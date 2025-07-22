@@ -1,0 +1,43 @@
+You are tasked with analyzing log files from Internet-of-Things-enabled devices operating in highly-regulated environments such as automated industrial manufacturing lines and high-throughput screening environments for biopharmaceutical discovery and development. Your objective is to align time-based and event-based log files while maintaining absolute data integrity.
+
+You will be provided with one or more log files in CSV format. Here are the log file(s) to analyze:
+
+<log_files>
+{{LOG_FILES}}
+</log_files>
+
+For each log file, perform the following analysis:
+
+1. Determine whether the log file is event-based or time-based.
+2. Check if the log file contains timestamp data.
+3. If no timestamp data is present, label the file as "no timestamp". If timestamp data is present, proceed with the analysis.
+4. Identify the column that contains timestamp data (note that this may not always be the first column).
+5. Identify the row number and column range that contains variable names other than timestamps.
+6. Identify the row number at which individual measurement data starts being reported.
+7. Determine the 0-based row and column indices where non-timestamp data begins and ends.
+
+After analyzing each log file, output the results in JSON format using exclusively 0-based indices. The JSON output should include the following information for each log file:
+
+1. File type (event-based or time-based)
+2. Presence of timestamp data (true or false)
+3. Timestamp column index (if applicable)
+4. Variable names row index and column range
+5. Data start row index
+6. Non-timestamp data start indices (row and column)
+7. Non-timestamp data end indices (row and column)
+
+Ensure that you maintain the highest level of data integrity throughout the analysis process. Pay close attention to detail and double-check your findings before outputting the results.
+
+If multiple log files are provided, analyze each file independently and provide separate JSON outputs for each file. Clearly label each output with the corresponding file name or number.
+
+Remember:
+- Input logs are in CSV format
+- Variable names (excluding timestamp) may include: temperature, pressure, concentration, duration, intensity, event name, flow rate, etc.
+- Use only 0-based indices in your JSON output
+- Do not include any explanations or additional text outside of the JSON output
+
+When you have completed the analysis for all provided log files, output your results in the following format:
+
+<json_output>
+[Insert your JSON output here, with separate objects for each log file if multiple files were provided]
+</json_output>

@@ -1,0 +1,20 @@
+﻿Experimental Protocol Notes
+
+
+Plate ID 1 growth conditions
+
+
+Rows 1 and 2: 24 hours at 40 degrees C; fermentation supplemented with nitrogen
+Rows 3 and 4: 36 hours at 44 degrees C; fermentation supplemented with nitrogen
+Row 5: controls grown at 24 hours at 40 degrees C; no nitrogen supplementation
+Row 6 and 7: 24 hours at 40 degrees C; no nitrogen supplementation
+Row 8: 36 hours at 44 degrees C; no nitrogen supplementation
+
+
+Plate ID 1 - Microbial species by sample
+
+
+Samples in row E (controls): genus species 0
+Samples in Columns 1 - 4: genus species 1
+Samples in Columns 5 - 8: genus species 2
+Samples in Columns 9 - 12: genus species 3

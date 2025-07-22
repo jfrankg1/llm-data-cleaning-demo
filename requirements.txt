@@ -1,0 +1,19 @@
+# Core dependencies for LLM Data Cleaning System
+anthropic>=0.18.1
+pandas>=2.2.0
+python-dotenv>=1.0.0
+PyPDF2>=3.0.0
+chardet>=5.2.0
+python-docx>=1.1.0
+striprtf>=0.0.26
+streamlit==1.29.0
+psycopg2-binary==2.9.9
+bcrypt==4.1.2
+python-jose[cryptography]==3.3.0
+
+# Visualization for admin dashboard
+plotly>=5.18.0
+
+# Security and validation
+requests>=2.31.0
+bleach>=6.1.0 
