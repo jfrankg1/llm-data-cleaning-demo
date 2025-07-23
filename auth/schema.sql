@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS usage_tracking (
     user_id UUID REFERENCES users(id),
     metric_type VARCHAR(50), -- 'api_call', 'storage', 'experiment'
     metric_value INTEGER,
+    metadata JSONB,
     timestamp TIMESTAMP DEFAULT NOW()
 );
 
@@ -181,6 +182,7 @@ CREATE INDEX IF NOT EXISTS idx_users_system_admin ON users(is_system_admin);
 CREATE INDEX IF NOT EXISTS idx_experiments_user ON experiments(user_id);
 CREATE INDEX IF NOT EXISTS idx_experiments_org ON experiments(organization_id);
 CREATE INDEX IF NOT EXISTS idx_usage_org_timestamp ON usage_tracking(organization_id, timestamp);
+CREATE INDEX IF NOT EXISTS idx_usage_tracking_metadata ON usage_tracking USING GIN(metadata);
 CREATE INDEX IF NOT EXISTS idx_sessions_token ON user_sessions(session_token);
 CREATE INDEX IF NOT EXISTS idx_password_history_user ON password_history(user_id);
 CREATE INDEX IF NOT EXISTS idx_account_lockouts_user ON account_lockouts(user_id);
