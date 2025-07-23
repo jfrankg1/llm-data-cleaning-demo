@@ -22,6 +22,7 @@ class Environment(Enum):
     DEVELOPMENT = "development"
     TESTING = "testing"
     PRODUCTION = "production"
+    DEMO = "demo"
 
 class EnvironmentConfig:
     """
@@ -49,38 +50,221 @@ class EnvironmentConfig:
         self._setup_logging()
     
     def _determine_environment(self, environment: Optional[str]) -> Environment:
-        """Determine which environment to use"""
+        """
+        Determine which environment to use with intelligent detection.
+        
+        Detection priority:
+        1. Explicit environment parameter
+        2. ENVIRONMENT variable
+        3. Demo folder detection
+        4. Hosting platform detection
+        5. Default to development
+        """
+        # 1. Explicit environment parameter takes precedence
         if environment:
             env_name = environment.lower()
-        else:
-            env_name = os.getenv('ENVIRONMENT', 'development').lower()
+            logging.info(f"Explicit environment parameter provided: '{environment}' (normalized: '{env_name}')")
+            try:
+                detected_env = Environment(env_name)
+                logging.info(f"Successfully parsed explicit environment: {detected_env.value}")
+                return detected_env
+            except ValueError:
+                valid_envs = [e.value for e in Environment]
+                logging.warning(f"Unknown environment '{env_name}', valid options are: {valid_envs}. Detecting automatically.")
         
-        try:
-            return Environment(env_name)
-        except ValueError:
-            logging.warning(f"Unknown environment '{env_name}', defaulting to development")
-            return Environment.DEVELOPMENT
+        # 2. Check ENVIRONMENT variable
+        env_var = os.getenv('ENVIRONMENT')
+        if env_var:
+            env_lower = env_var.lower()
+            logging.info(f"Found ENVIRONMENT variable: '{env_var}' (normalized: '{env_lower}')")
+            try:
+                detected_env = Environment(env_lower)
+                logging.info(f"Successfully parsed environment: {detected_env.value}")
+                return detected_env
+            except ValueError:
+                valid_envs = [e.value for e in Environment]
+                logging.warning(f"Unknown ENVIRONMENT value '{env_var}', valid options are: {valid_envs}. Detecting automatically.")
+        
+        # 3. Check for demo folder deployment
+        if self._is_demo_folder():
+            logging.info("Detected demo folder deployment, using 'demo' configuration")
+            return Environment.DEMO
+        
+        # 4. Auto-detect based on hosting platform
+        
+        # Check for Streamlit Cloud
+        if self._is_streamlit_cloud():
+            logging.info("Detected Streamlit Cloud environment, using 'demo' configuration")
+            return Environment.DEMO
+        
+        # Check for production indicators
+        if self._is_production_environment():
+            logging.info("Detected production environment indicators")
+            return Environment.PRODUCTION
+        
+        # Check for CI/CD testing environment
+        if self._is_ci_environment():
+            logging.info("Detected CI/CD environment, using 'testing' configuration")
+            return Environment.TESTING
+        
+        # 5. Default to development
+        logging.info("No specific environment detected, defaulting to development")
+        return Environment.DEVELOPMENT
+    
+    def _is_demo_folder(self) -> bool:
+        """Detect if running from a demo folder deployment"""
+        # Check if we're in a folder structure that indicates demo deployment
+        current_path = str(self.project_root).lower()
+        
+        # Look for demo folder indicators
+        demo_indicators = [
+            'llm-data-cleaning-demo',
+            'demo',
+            'demonstration'
+        ]
+        
+        # Check if current path contains demo indicators
+        if any(indicator in current_path for indicator in demo_indicators):
+            return True
+        
+        # Check if .env.demo exists but .env.development doesn't (strong demo indicator)
+        demo_env_file = self.project_root / '.env.demo'
+        dev_env_file = self.project_root / '.env.development'
+        
+        if demo_env_file.exists() and not dev_env_file.exists():
+            return True
+        
+        # Check for demo-specific files
+        demo_files = [
+            'DEMO_SCENARIOS.md',
+            'DEPLOYMENT_GUIDE.md',
+            'STREAMLIT_CLOUD_SETUP.md'
+        ]
+        
+        demo_file_count = sum(1 for file in demo_files if (self.project_root / file).exists())
+        if demo_file_count >= 2:  # If multiple demo files exist, likely demo deployment
+            return True
+        
+        return False
+    
+    def _is_streamlit_cloud(self) -> bool:
+        """Detect if running on Streamlit Cloud"""
+        # Enhanced Streamlit Cloud detection for current platform
+        
+        # Check for explicit Streamlit Cloud environment variables
+        streamlit_indicators = [
+            'STREAMLIT_SHARING_MODE',
+            'STREAMLIT_SERVER_HEADLESS', 
+            'IS_STREAMLIT_CLOUD'
+        ]
+        
+        for indicator in streamlit_indicators:
+            if os.getenv(indicator):
+                logging.info(f"Found Streamlit Cloud indicator: {indicator}")
+                return True
+        
+        # Check for Streamlit Cloud specific paths (updated for current platform)
+        streamlit_paths = ['/mount/src', '/app', '/workspace']
+        for path in streamlit_paths:
+            if os.path.exists(path):
+                logging.info(f"Found Streamlit Cloud path indicator: {path}")
+                return True
+        
+        # Check for Streamlit Cloud hostname patterns
+        hostname = os.environ.get('HOSTNAME', '').lower()
+        if any(pattern in hostname for pattern in ['streamlit', 'share.streamlit.io']):
+            logging.info(f"Found Streamlit Cloud hostname pattern: {hostname}")
+            return True
+        
+        # Check for Streamlit-specific environment setup
+        if 'streamlit' in os.environ.get('PATH', '').lower():
+            logging.info("Found Streamlit in PATH")
+            return True
+        
+        # Check for other cloud deployment indicators that suggest Streamlit Cloud
+        cloud_indicators = [
+            'STREAMLIT_APP_URL',
+            'STREAMLIT_CLOUD',
+            'STREAMLIT_DEPLOYMENT'
+        ]
+        
+        for indicator in cloud_indicators:
+            if os.getenv(indicator):
+                logging.info(f"Found additional Streamlit indicator: {indicator}")
+                return True
+        
+        return False
+    
+    def _is_production_environment(self) -> bool:
+        """Detect production environment indicators"""
+        # Common production indicators
+        production_indicators = [
+            'PRODUCTION',
+            'PROD_ENV',
+            'IS_PRODUCTION',
+            'NODE_ENV',  # Often set to 'production'
+            'FLASK_ENV',  # For Flask apps
+            'DJANGO_SETTINGS_MODULE'  # For Django apps
+        ]
+        
+        # Check environment variables
+        for indicator in production_indicators:
+            value = os.getenv(indicator, '').lower()
+            if value in ['production', 'prod', 'true', '1']:
+                return True
+        
+        # Check for production domains in hostname
+        hostname = os.environ.get('HOSTNAME', '').lower()
+        if any(domain in hostname for domain in ['prod', 'production', '.com', '.io']):
+            return True
+        
+        # Check for cloud provider indicators
+        cloud_providers = [
+            'AWS_EXECUTION_ENV',
+            'AWS_LAMBDA_FUNCTION_NAME',
+            'GOOGLE_CLOUD_PROJECT',
+            'AZURE_FUNCTIONS_ENVIRONMENT',
+            'HEROKU_APP_NAME',
+            'DYNO',  # Heroku
+            'WEBSITE_INSTANCE_ID'  # Azure App Service
+        ]
+        
+        if any(os.getenv(provider) for provider in cloud_providers):
+            return True
+        
+        return False
+    
+    def _is_ci_environment(self) -> bool:
+        """Detect CI/CD environment"""
+        ci_indicators = [
+            'CI',
+            'CONTINUOUS_INTEGRATION',
+            'GITHUB_ACTIONS',
+            'GITLAB_CI',
+            'JENKINS_URL',
+            'TRAVIS',
+            'CIRCLECI',
+            'BUILDKITE',
+            'DRONE',
+            'BITBUCKET_PIPELINES_UUID'
+        ]
+        
+        return any(os.getenv(indicator) for indicator in ci_indicators)
     
     def _load_environment_config(self):
         """Load environment-specific .env file"""
-        # Check for .env.demo first (for demonstration purposes)
-        demo_env_file = self.project_root / '.env.demo'
-        if demo_env_file.exists():
-            load_dotenv(demo_env_file)
-            logging.info(f"Loaded demonstration configuration from {demo_env_file}")
+        # Load base .env file first (fallback values)
+        base_env_file = self.project_root / '.env'
+        if base_env_file.exists():
+            load_dotenv(base_env_file)
+        
+        # Load environment-specific .env file
+        env_file = self.project_root / f'.env.{self.environment.value}'
+        if env_file.exists():
+            load_dotenv(env_file, override=True)
+            logging.info(f"Loaded environment configuration from {env_file}")
         else:
-            # Load base .env file first (fallback values)
-            base_env_file = self.project_root / '.env'
-            if base_env_file.exists():
-                load_dotenv(base_env_file)
-            
-            # Load environment-specific .env file
-            env_file = self.project_root / f'.env.{self.environment.value}'
-            if env_file.exists():
-                load_dotenv(env_file, override=True)
-                logging.info(f"Loaded environment configuration from {env_file}")
-            else:
-                logging.warning(f"Environment file {env_file} not found, using defaults")
+            logging.warning(f"Environment file {env_file} not found, using defaults")
         
         # Load configuration into our config dict
         self._populate_config()
@@ -98,8 +282,8 @@ class EnvironmentConfig:
             'url': os.getenv('DATABASE_URL'),
             'host': os.getenv('DB_HOST', 'localhost'),
             'port': self.get_int('DB_PORT', 5432),
-            'name': os.getenv('DB_NAME', 'dsaas'),
-            'user': os.getenv('DB_USER', 'dsaas_user'),
+            'name': os.getenv('DB_NAME', 'llm_data_cleaning'),
+            'user': os.getenv('DB_USER', 'llm_data_cleaning_user'),
             'password': os.getenv('DB_PASSWORD'),
             'pool_size': self.get_int('DB_POOL_SIZE', 20),
             'max_overflow': self.get_int('DB_MAX_OVERFLOW', 10),
@@ -178,12 +362,43 @@ class EnvironmentConfig:
             'enable_debug_logging': self.get_bool('ENABLE_DEBUG_LOGGING', self.environment == Environment.DEVELOPMENT),
             'enable_sql_logging': self.get_bool('ENABLE_SQL_LOGGING', self.environment == Environment.DEVELOPMENT),
             'enable_performance_monitoring': self.get_bool('ENABLE_PERFORMANCE_MONITORING', True),
-            'disable_rate_limiting': self.get_bool('DISABLE_RATE_LIMITING', False),
+            'disable_rate_limiting': self.get_bool('DISABLE_RATE_LIMITING', self.environment == Environment.DEMO),
             'enable_test_endpoints': self.get_bool('ENABLE_TEST_ENDPOINTS', self.environment == Environment.DEVELOPMENT),
             'enable_analytics': self.get_bool('ENABLE_ANALYTICS', self.environment != Environment.DEVELOPMENT),
-            'enable_monitoring': self.get_bool('ENABLE_MONITORING', True),
+            'enable_monitoring': self.get_bool('ENABLE_MONITORING', self.environment != Environment.DEMO),
             'enable_audit_logging': self.get_bool('ENABLE_AUDIT_LOGGING', self.environment == Environment.PRODUCTION),
+            'enable_admin_features': self.get_bool('ENABLE_ADMIN_FEATURES', self.environment != Environment.DEMO),
+            'enable_billing_features': self.get_bool('ENABLE_BILLING_FEATURES', self.environment == Environment.PRODUCTION),
         }
+        
+        # Demo-specific features
+        if self.environment == Environment.DEMO:
+            self.config['demo'] = {
+                'demo_mode': self.get_bool('DEMO_MODE', True),
+                'demo_branding': self.get_bool('DEMO_BRANDING', True),
+                'show_customer_value_props': self.get_bool('SHOW_CUSTOMER_VALUE_PROPS', True),
+                'enable_prospect_tracking': self.get_bool('ENABLE_PROSPECT_TRACKING', True),
+                'enable_demo_data_reset': self.get_bool('ENABLE_DEMO_DATA_RESET', True),
+                'demo_data_reset_schedule': os.getenv('DEMO_DATA_RESET_SCHEDULE', '0 0 * * *'),
+                'demo_sample_data_path': os.getenv('DEMO_SAMPLE_DATA_PATH', '/app/demo_data'),
+                'demo_user_email': os.getenv('DEMO_USER_EMAIL', 'demo@example.com'),
+                'demo_user_password': os.getenv('DEMO_USER_PASSWORD', 'demo123'),
+                'demo_organization_name': os.getenv('DEMO_ORGANIZATION_NAME', 'Demo Laboratory'),
+                'demo_welcome_message': os.getenv('DEMO_WELCOME_MESSAGE', 'Welcome to the LLM Data Cleaning System Demo!'),
+                'demo_footer_message': os.getenv('DEMO_FOOTER_MESSAGE', 'Contact us for a full enterprise deployment'),
+                'demo_limitation_message': os.getenv('DEMO_LIMITATION_MESSAGE', 'This is a demonstration environment with limited features'),
+                'show_feature_highlights': self.get_bool('SHOW_FEATURE_HIGHLIGHTS', True),
+                'show_value_metrics': self.get_bool('SHOW_VALUE_METRICS', True),
+                'enable_contact_form': self.get_bool('ENABLE_CONTACT_FORM', True),
+                'demo_contact_email': os.getenv('DEMO_CONTACT_EMAIL', 'sales@llm-data-cleaning.example.com'),
+            }
+        else:
+            self.config['demo'] = {
+                'demo_mode': False,
+                'demo_branding': False,
+                'show_customer_value_props': False,
+                'enable_prospect_tracking': False,
+            }
         
         # External services
         self.config['external_services'] = {
@@ -196,8 +411,8 @@ class EnvironmentConfig:
         self.config['email'] = {
             'backend': os.getenv('EMAIL_BACKEND', 'console' if self.environment == Environment.DEVELOPMENT else 'sendgrid'),
             'sendgrid_api_key': os.getenv('SENDGRID_API_KEY'),
-            'from_email': os.getenv('EMAIL_FROM', 'noreply@dsaas.example.com'),
-            'admin_email': os.getenv('EMAIL_ADMIN', 'admin@dsaas.example.com'),
+            'from_email': os.getenv('EMAIL_FROM', 'noreply@llm-data-cleaning.example.com'),
+            'admin_email': os.getenv('EMAIL_ADMIN', 'admin@llm-data-cleaning.example.com'),
             'rate_limit': self.get_int('EMAIL_RATE_LIMIT', 100),
         }
         
@@ -227,8 +442,8 @@ class EnvironmentConfig:
         
         required_fields = []
         
-        # Only require API key and secret key for non-production or production with real values
-        if self.environment != Environment.PRODUCTION or (
+        # Only require API key and secret key for non-production/non-demo or production with real values
+        if self.environment not in [Environment.PRODUCTION, Environment.DEMO] or (
             self.config['api']['anthropic_api_key'] and 
             not self.config['api']['anthropic_api_key'].startswith('${')
         ):
@@ -237,8 +452,8 @@ class EnvironmentConfig:
                 ('security.secret_key', 'SECRET_KEY'),
             ])
         
-        # Database URL is required unless individual DB params are provided
-        if not self.config['database']['url']:
+        # Database URL is required unless individual DB params are provided (except for demo)
+        if self.environment != Environment.DEMO and not self.config['database']['url']:
             if not all([
                 self.config['database']['host'],
                 self.config['database']['name'],
@@ -254,8 +469,8 @@ class EnvironmentConfig:
                 missing_fields.append(env_var)
         
         if missing_fields:
-            if self.environment == Environment.DEVELOPMENT:
-                # For development, just warn about missing fields
+            if self.environment in [Environment.DEVELOPMENT, Environment.DEMO]:
+                # For development and demo, just warn about missing fields
                 import logging
                 logger = logging.getLogger(__name__)
                 logger.warning(f"Missing environment variables (using defaults): {', '.join(missing_fields)}")
@@ -334,6 +549,10 @@ class EnvironmentConfig:
         """Check if running in production environment"""
         return self.environment == Environment.PRODUCTION
     
+    def is_demo(self) -> bool:
+        """Check if running in demo environment"""
+        return self.environment == Environment.DEMO
+    
     def get_database_url(self) -> str:
         """Get complete database URL"""
         if self.config['database']['url']:
@@ -399,6 +618,10 @@ def is_testing() -> bool:
 def is_production() -> bool:
     """Check if running in production environment"""
     return get_config().is_production()
+
+def is_demo() -> bool:
+    """Check if running in demo environment"""
+    return get_config().is_demo()
 
 def get_database_url() -> str:
     """Get database URL for current environment"""

@@ -27,8 +27,8 @@ def show_auth_page():
     st.markdown('<div class="auth-container">', unsafe_allow_html=True)
     
     # App title and description
-    st.title("🧬 LLM Data Analysis System")
-    st.markdown("**AI-powered experimental data analysis for research labs**")
+    st.title("🧬 LLM Data Cleaning System")
+    st.markdown("**AI-powered experimental data cleaning for research labs**")
     st.markdown("---")
     
     # Authentication tabs - SIMPLIFIED WITHOUT RERUN
