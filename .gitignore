@@ -61,3 +61,6 @@ docker-compose.override.yml
 local_storage/
 dev_storage/
 dev_uploads/
+
+# Demo environment file (contains only placeholders, safe to commit)
+!.env.demo
