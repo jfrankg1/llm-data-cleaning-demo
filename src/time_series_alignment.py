@@ -552,8 +552,24 @@ class TimeSeriesAlignmentProcessor:
     def _extract_file_analysis(self, analysis_results: Dict[str, Any], filename: str) -> Optional[Dict[str, Any]]:
         """Extract analysis results for a specific file"""
         try:
-            # Handle different analysis result formats
-            if isinstance(analysis_results, dict):
+            # Handle new JSON structure with 'files' array
+            if isinstance(analysis_results, dict) and 'files' in analysis_results:
+                # Iterate through the files array to find matching filename
+                for file_obj in analysis_results['files']:
+                    if isinstance(file_obj, dict) and file_obj.get('file_name') == filename:
+                        logger.info(f"Found analysis for {filename}: {file_obj}")
+                        return file_obj
+                
+                # If exact match not found, try partial matching
+                for file_obj in analysis_results['files']:
+                    if isinstance(file_obj, dict):
+                        file_name = file_obj.get('file_name', '')
+                        if filename in file_name or file_name in filename:
+                            logger.info(f"Found partial match for {filename}: {file_obj}")
+                            return file_obj
+            
+            # Handle legacy formats for backward compatibility
+            elif isinstance(analysis_results, dict):
                 # Check if the results contain file-specific analysis
                 if filename in analysis_results:
                     return analysis_results[filename]
@@ -579,7 +595,7 @@ class TimeSeriesAlignmentProcessor:
             return None
     
     def _parse_analysis_response(self, response: str) -> Dict[str, Any]:
-        """Parse Claude's JSON response"""
+        """Parse Claude's JSON response with enhanced structure support"""
         try:
             # Extract JSON from response
             import re
@@ -597,7 +613,32 @@ class TimeSeriesAlignmentProcessor:
             # Parse the JSON
             analysis_results = json.loads(json_text)
             
-            return analysis_results
+            # Validate the new structure and add confidence validation
+            if isinstance(analysis_results, dict) and 'files' in analysis_results:
+                # New structure with files array
+                for file_info in analysis_results['files']:
+                    # Validate confidence score
+                    confidence = file_info.get('confidence_score', 0)
+                    if confidence < 8.0 and file_info.get('imputed_timestamps'):
+                        logger.warning(f"Low confidence score ({confidence}) for imputed timestamps in {file_info.get('file_name', 'unknown')}")
+                        # Keep the timestamps but mark as low confidence
+                        file_info['low_confidence_imputation'] = True
+                    
+                    # Ensure timestamp_source field exists
+                    if 'timestamp_source' not in file_info:
+                        if file_info.get('timestamp_present', False):
+                            file_info['timestamp_source'] = 'original'
+                        elif file_info.get('imputed_timestamps'):
+                            file_info['timestamp_source'] = 'imputed'
+                        else:
+                            file_info['timestamp_source'] = 'none'
+                
+                logger.info(f"Parsed enhanced response with {len(analysis_results['files'])} files")
+                return analysis_results
+            else:
+                # Legacy structure - maintain backward compatibility
+                logger.info("Parsing legacy response structure")
+                return analysis_results
             
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse JSON response: {e}")
@@ -633,9 +674,25 @@ class TimeSeriesAlignmentProcessor:
             for file_info in file_contents:
                 filename = file_info['filename']
                 
-                # Get analysis for this file
+                # Get analysis for this file - handle both new and legacy structures
                 file_analysis = None
-                if isinstance(analysis_results, list):
+                
+                # New structure with 'files' array
+                if isinstance(analysis_results, dict) and 'files' in analysis_results:
+                    for result in analysis_results['files']:
+                        if (result.get('file_name') == filename or 
+                            filename in result.get('file_name', '')):
+                            file_analysis = result
+                            break
+                    
+                    # If not found by exact filename, try by index
+                    if not file_analysis and analysis_results['files']:
+                        file_index = next((i for i, f in enumerate(file_contents) if f['filename'] == filename), None)
+                        if file_index is not None and file_index < len(analysis_results['files']):
+                            file_analysis = analysis_results['files'][file_index]
+                
+                # Legacy structure handling
+                elif isinstance(analysis_results, list):
                     # Find matching analysis result by filename or index
                     for i, result in enumerate(analysis_results):
                         if (result.get('filename') == filename or 
@@ -822,6 +879,118 @@ class TimeSeriesAlignmentProcessor:
         
         return optimized_df
     
+    def _correct_data_start_row(self, df: pd.DataFrame, claude_data_start: int) -> int:
+        """Correct Claude's data_start_row by finding first non-empty, non-comment row"""
+        try:
+            # Start from Claude's suggestion and look forward for actual data
+            for i in range(claude_data_start, len(df)):
+                if i < len(df):
+                    # Check if this row has actual data (not empty, not just comments)
+                    row_data = df.iloc[i]
+                    # Convert to string and check if it contains meaningful content
+                    row_str = str(row_data.iloc[0]) if len(row_data) > 0 else ""
+                    
+                    # Look for EVENT_ID pattern or timestamp pattern to identify data rows
+                    is_data_row = False
+                    if row_str.strip() and row_str.strip() != 'nan' and not row_str.strip().startswith('#'):
+                        # Check for EVENT_ID pattern (pH control files)
+                        if 'EVENT_ID:' in row_str:
+                            is_data_row = True
+                            logger.info(f"Found EVENT_ID data pattern at row {i}: {row_str[:50]}")
+                        # Check for timestamp pattern (time-based files)
+                        elif any(char.isdigit() for char in row_str) and (':' in row_str or '-' in row_str):
+                            is_data_row = True
+                            logger.info(f"Found timestamp data pattern at row {i}: {row_str[:50]}")
+                        # Check for non-header content (anything that's not obviously a header)
+                        elif not any(header_word in row_str.lower() for header_word in ['time', 'event', 'column', 'header', 'name']):
+                            # Look at the structure - if it's data-like (has delimiters, numbers, etc.)
+                            if ',' in row_str or '\t' in row_str or len(row_str.split()) > 1:
+                                is_data_row = True
+                                logger.info(f"Found structured data at row {i}: {row_str[:50]}")
+                    
+                    if is_data_row:
+                        if i != claude_data_start:
+                            logger.info(f"Corrected data start row from {claude_data_start} to {i}")
+                        return i
+            
+            # If no clear data pattern found, try Claude's suggestion + 1 as a common correction
+            suggested_correction = claude_data_start + 1
+            if suggested_correction < len(df):
+                row_data = df.iloc[suggested_correction]
+                row_str = str(row_data.iloc[0]) if len(row_data) > 0 else ""
+                if row_str.strip() and row_str.strip() != 'nan':
+                    logger.info(f"Applying +1 correction: {claude_data_start} -> {suggested_correction}")
+                    return suggested_correction
+            
+            # If still no data found, stick with Claude's suggestion
+            logger.warning(f"Could not find data start beyond Claude's suggestion {claude_data_start}")
+            return claude_data_start
+            
+        except Exception as e:
+            logger.warning(f"Error correcting data start row: {e}")
+            return claude_data_start
+    
+    def _extract_column_names_from_data(self, df: pd.DataFrame, data_start_row: int) -> List[str]:
+        """Extract meaningful column names from the actual data structure"""
+        try:
+            if len(df) <= data_start_row:
+                return []
+            
+            # Get first data row
+            first_row = df.iloc[data_start_row] if len(df) > data_start_row else []
+            
+            # Extract column names based on data patterns
+            column_names = []
+            for i, value in enumerate(first_row):
+                if pd.isna(value) or str(value).strip() == '' or str(value).strip() == 'nan':
+                    column_names.append(f'col_{i}')
+                elif ':' in str(value):
+                    # For "KEY:VALUE" format, use the KEY part
+                    key = str(value).split(':')[0]
+                    column_names.append(key)
+                else:
+                    # For other formats, try to use first part or create generic name
+                    val_str = str(value).strip()
+                    if ',' in val_str:
+                        # If comma-separated, use first part
+                        first_part = val_str.split(',')[0]
+                        if len(first_part) > 0 and len(first_part) < 20:  # Reasonable length
+                            column_names.append(first_part)
+                        else:
+                            column_names.append(f'col_{i}')
+                    else:
+                        column_names.append(f'col_{i}')
+            
+            logger.info(f"Extracted column names from data: {column_names}")
+            return column_names
+            
+        except Exception as e:
+            logger.warning(f"Failed to extract column names from data: {e}")
+            # Fallback to generic names
+            return [f'col_{i}' for i in range(len(df.columns))]
+    
+    def _add_file_prefix_to_columns(self, df: pd.DataFrame, filename: str) -> pd.DataFrame:
+        """Add file prefix to column names to prevent conflicts"""
+        try:
+            # Extract meaningful prefix from filename
+            file_prefix = filename.replace('.txt', '').replace('.csv', '')
+            file_prefix = file_prefix.replace('_log', '').replace('_data', '')  # Clean up common suffixes
+            
+            new_columns = []
+            for col in df.columns:
+                if col in ['timestamp', 'source_file', 'timestamp_source', 'confidence_score']:
+                    new_columns.append(col)  # Keep standard columns as-is
+                else:
+                    new_columns.append(f"{file_prefix}_{col}")
+            
+            df.columns = new_columns
+            logger.info(f"Added file prefix '{file_prefix}' to columns")
+            return df
+            
+        except Exception as e:
+            logger.warning(f"Failed to add file prefix: {e}")
+            return df
+    
     def _parse_file_based_on_analysis(
         self,
         file_path: str,
@@ -840,59 +1009,132 @@ class TimeSeriesAlignmentProcessor:
         try:
             logger.info(f"Parsing file {file_path} with analysis: {analysis}")
             
-            # Read the file directly first
+            # Read the file based on extension and Claude's analysis
             import pandas as pd
             try:
-                # For complex files, we need to be more flexible with CSV reading
-                # Try different approaches to handle problematic CSV formats
                 df = None
+                file_ext = file_path.lower().split('.')[-1]
                 
-                # For complex files, go straight to manual parsing
-                # since pandas CSV reading often fails on complex scientific formats
-                try:
-                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        lines = [line.strip() for line in f.readlines() if line.strip()]
-                    
-                    # Parse lines as CSV manually
-                    import csv
-                    from io import StringIO
-                    
-                    csv_data = []
-                    for line in lines:
-                        try:
-                            # Skip comment lines that start with #
-                            if line.strip().startswith('#'):
-                                csv_data.append([line.strip()])  # Keep as single column for structure
-                                continue
-                            
-                            # Parse each line as CSV
-                            reader = csv.reader(StringIO(line))
-                            row = next(reader)
-                            csv_data.append(row)
-                        except Exception as line_e:
-                            # For problematic lines, try to split by comma as fallback
-                            try:
-                                row = line.split(',')
-                                csv_data.append(row)
-                            except:
-                                # Skip completely problematic lines
-                                continue
-                    
-                    if csv_data:
-                        # Find the maximum number of columns
-                        max_cols = max(len(row) for row in csv_data)
-                        # Pad shorter rows with empty strings
-                        for row in csv_data:
-                            while len(row) < max_cols:
-                                row.append('')
+                # For .txt files or files that Claude analyzed, use enhanced parsing
+                if file_ext == 'txt' or analysis.get('file_type') in ['time-based', 'event-based']:
+                    try:
+                        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            all_lines = f.readlines()
                         
-                        df = pd.DataFrame(csv_data)
-                        logger.info(f"Read file manually: {df.shape[0]} rows, {df.shape[1]} columns")
-                    else:
-                        raise ValueError("No valid CSV data found")
-                except Exception as manual_e:
-                    logger.error(f"Manual parsing failed: {manual_e}")
-                    return None
+                        # ENHANCED DEBUG: File Reading Validation
+                        logger.info(f"📖 FILE READING VALIDATION:")
+                        logger.info(f"   📄 File: {file_path}")
+                        logger.info(f"   📊 Raw lines read: {len(all_lines)}")
+                        
+                        # Check for final line issues
+                        if all_lines:
+                            last_line_raw = all_lines[-1]
+                            has_final_newline = last_line_raw.endswith('\n') or last_line_raw.endswith('\r')
+                            logger.info(f"   📝 Last line raw: {repr(last_line_raw[:50])}{'...' if len(last_line_raw) > 50 else ''}")
+                            logger.info(f"   ⏎ Has final newline: {has_final_newline}")
+                        
+                        # Preserve line structure for proper parsing
+                        lines = []
+                        for i, line in enumerate(all_lines):
+                            # Only strip newline characters, preserve internal whitespace
+                            line = line.rstrip('\n\r')
+                            lines.append(line)
+                            
+                            # Log first and last few lines for validation
+                            if i < 3 or i >= len(all_lines) - 3:
+                                logger.info(f"   [{i:2d}] {repr(line[:60])}{'...' if len(line) > 60 else ''}")
+                        
+                        logger.info(f"   ✅ Processed lines: {len(lines)}")
+                        
+                        # Look for EVENT_ID patterns specifically
+                        event_id_lines = []
+                        for i, line in enumerate(lines):
+                            if 'EVENT_ID:' in line:
+                                event_id_lines.append((i, line))
+                        
+                        if event_id_lines:
+                            logger.info(f"   🎯 EVENT_ID lines found: {len(event_id_lines)}")
+                            logger.info(f"   📍 First EVENT_ID: line {event_id_lines[0][0]} = {event_id_lines[0][1]}")
+                            logger.info(f"   📍 Last EVENT_ID: line {event_id_lines[-1][0]} = {event_id_lines[-1][1]}")
+                            
+                            # Check specifically for EVENT_ID:0074
+                            event_0074_found = any('EVENT_ID:0074' in line for line in lines)
+                            logger.info(f"   🔍 EVENT_ID:0074 found in file: {event_0074_found}")
+                            if not event_0074_found:
+                                logger.warning(f"   ⚠️  EVENT_ID:0074 NOT FOUND in raw file - this is the problem!")
+                        else:
+                            logger.info(f"   ℹ️  No EVENT_ID patterns found (may be timestamp-based file)")
+                        
+                        # Use analysis hints for parsing
+                        data_start = analysis.get('data_start_row_index', 0)
+                        
+                        # Try to detect delimiter from the file content
+                        delimiters = ['\t', ',', ';', '|', '  ']  # Double space for space-separated
+                        detected_delimiter = None
+                        max_consistency = 0
+                        
+                        # Sample lines to detect delimiter (skip header lines)
+                        sample_start = max(data_start, 0)
+                        sample_end = min(sample_start + 10, len(lines))
+                        
+                        for delim in delimiters:
+                            split_counts = []
+                            for i in range(sample_start, sample_end):
+                                if i < len(lines) and lines[i].strip():
+                                    split_counts.append(len(lines[i].split(delim)))
+                            
+                            if split_counts and len(set(split_counts)) == 1 and split_counts[0] > 1:
+                                # Consistent splits, good delimiter
+                                if split_counts[0] > max_consistency:
+                                    max_consistency = split_counts[0]
+                                    detected_delimiter = delim
+                        
+                        # Parse the file with detected delimiter
+                        parsed_data = []
+                        for line in lines:
+                            if line.strip():  # Non-empty lines
+                                if detected_delimiter:
+                                    parts = [p.strip() for p in line.split(detected_delimiter)]
+                                    parsed_data.append(parts)
+                                else:
+                                    # No delimiter detected, try space-separated or single column
+                                    parts = line.split()
+                                    if len(parts) > 1:
+                                        parsed_data.append(parts)
+                                    else:
+                                        parsed_data.append([line.strip()])
+                            else:
+                                # KEEP BLANK LINES AS EMPTY ROWS to maintain row correspondence with Claude's analysis
+                                parsed_data.append([''])  # Single empty column to maintain row count
+                        
+                        if parsed_data:
+                            # Ensure consistent columns
+                            max_cols = max(len(row) for row in parsed_data)
+                            for i, row in enumerate(parsed_data):
+                                while len(row) < max_cols:
+                                    row.append('')
+                            
+                            df = pd.DataFrame(parsed_data)
+                            logger.info(f"Parsed {file_ext} file with delimiter '{detected_delimiter}': {df.shape[0]} rows, {df.shape[1]} columns")
+                        
+                    except Exception as txt_e:
+                        logger.error(f"Text file parsing failed: {txt_e}")
+                        # Try pandas as fallback
+                        try:
+                            df = pd.read_csv(file_path, sep=None, engine='python')
+                        except:
+                            return None
+                
+                # For CSV files, use standard pandas reading
+                else:
+                    try:
+                        df = pd.read_csv(file_path)
+                    except:
+                        # Try with different parameters
+                        try:
+                            df = pd.read_csv(file_path, sep=None, engine='python')
+                        except:
+                            return None
                 
                 if df is None or df.empty:
                     logger.error("Failed to read any data from file")
@@ -902,25 +1144,64 @@ class TimeSeriesAlignmentProcessor:
                 logger.error(f"Failed to read file {file_path}: {e}")
                 return None
             
+            # Determine processing mode based on analysis
+            timestamp_source = analysis.get('timestamp_source', 'none')
+            
+            logger.info(f"Processing file with timestamp_source: {timestamp_source}")
+            
+            # Extract filename from file_path for column prefixing
+            filename = os.path.basename(file_path)
+            
+            if timestamp_source == 'original':
+                # Mode 1: Original timestamps - use existing logic
+                return self._process_original_timestamps(df, analysis, filename)
+            elif timestamp_source == 'imputed':
+                # Mode 2: Imputed timestamps - new method
+                return self._process_imputed_timestamps(df, analysis, filename)
+            else:
+                # Mode 3: Event-based only - new method
+                return self._process_event_based_data(df, analysis, filename)
+            
+        except Exception as e:
+            logger.error(f"Failed to parse file {file_path} based on analysis: {e}")
+            return None
+    
+    def _process_original_timestamps(self, df: pd.DataFrame, analysis: Dict[str, Any], filename: str) -> Optional[pd.DataFrame]:
+        """Process files with original timestamps using existing logic"""
+        try:
             # Apply structural information from analysis
-            data_start_row = analysis.get('data_start_row_index', 0)
+            claude_data_start = analysis.get('data_start_row_index', 0)
             variable_names_row = analysis.get('variable_names_row_index', 0)
             
+            # Use Claude's data start row directly (correction disabled due to improved prompt)
+            data_start_row = claude_data_start
+            logger.info(f"Using Claude's data_start_row: {data_start_row} (correction disabled)")
+            
             # Extract column headers
-            if variable_names_row < len(df):
+            # Handle negative indices properly (negative means no headers)
+            if (variable_names_row is not None and 
+                variable_names_row >= 0 and 
+                variable_names_row < len(df)):
                 headers = df.iloc[variable_names_row].tolist()
                 logger.info(f"Extracted headers from row {variable_names_row}: {headers}")
             else:
                 # Generate default headers
                 headers = [f'col_{i}' for i in range(df.shape[1])]
-                logger.warning(f"Generated default headers: {headers}")
+                logger.info(f"Generated default headers (variable_names_row={variable_names_row}): {headers}")
             
             # Extract data starting from the specified row
             if data_start_row < len(df):
                 data_df = df.iloc[data_start_row:].copy()
                 data_df.columns = headers
                 data_df = data_df.reset_index(drop=True)
-                logger.info(f"Extracted data from row {data_start_row}: {data_df.shape[0]} rows")
+                logger.info(f"Extracted data from row {data_start_row}: {data_df.shape[0]} rows (original file had {len(df)} total rows)")
+                
+                # Log first and last data rows for validation
+                if len(data_df) > 0:
+                    first_row = data_df.iloc[0].tolist()
+                    last_row = data_df.iloc[-1].tolist()
+                    logger.info(f"First data row content: {first_row}")
+                    logger.info(f"Last data row content: {last_row}")
             else:
                 logger.error(f"Data start row {data_start_row} is beyond file length {len(df)}")
                 return None
@@ -950,20 +1231,282 @@ class TimeSeriesAlignmentProcessor:
                     logger.info("Successfully converted timestamp column to datetime")
                 except Exception as e:
                     logger.warning(f"Failed to convert timestamp column: {e}")
-                    # If timestamp conversion fails, treat as event-based data
-                    if 'timestamp' in data_df.columns:
-                        data_df = data_df.drop(columns=['timestamp'])
-                    logger.info("Treating as event-based data without timestamps")
+                    return None
             else:
                 logger.warning(f"No valid timestamp column found at index {timestamp_col_index}")
+                return None
             
-            logger.info(f"Final parsed DataFrame: {data_df.shape[0]} rows, {data_df.shape[1]} columns")
-            logger.info(f"Columns: {list(data_df.columns)}")
+            # Add metadata
+            data_df['timestamp_source'] = 'original'
             
+            # Add file prefix to columns to prevent conflicts
+            data_df = self._add_file_prefix_to_columns(data_df, filename)
+            
+            logger.info(f"Original timestamps processed: {data_df.shape[0]} rows, {data_df.shape[1]} columns")
             return data_df
             
         except Exception as e:
-            logger.error(f"Failed to parse file {file_path} based on analysis: {e}")
+            logger.error(f"Failed to process original timestamps: {e}")
+            return None
+    
+    def _process_imputed_timestamps(self, df: pd.DataFrame, analysis: Dict[str, Any], filename: str) -> Optional[pd.DataFrame]:
+        """Process files with imputed timestamps from Claude AI"""
+        try:
+            # Apply structural information from analysis
+            claude_data_start = analysis.get('data_start_row_index', 0)
+            variable_names_row = analysis.get('variable_names_row_index', 0)
+            
+            # Use Claude's data start row directly (correction disabled due to improved prompt)
+            data_start_row = claude_data_start
+            logger.info(f"Using Claude's data_start_row: {data_start_row} (correction disabled)")
+            
+            # Extract column headers
+            # For event-based files, negative variable_names_row means "no headers" 
+            if (variable_names_row is not None and 
+                variable_names_row >= 0 and 
+                variable_names_row < len(df)):
+                headers = df.iloc[variable_names_row].tolist()
+                logger.info(f"Extracted headers from row {variable_names_row}: {headers}")
+            else:
+                # Extract meaningful column names from the data structure
+                headers = self._extract_column_names_from_data(df, data_start_row)
+                if not headers:
+                    # Final fallback to generic names
+                    headers = [f'col_{i}' for i in range(df.shape[1])]
+                logger.info(f"Generated data-based headers (variable_names_row={variable_names_row}): {headers}")
+            
+            # Extract data starting from the specified row
+            if data_start_row < len(df):
+                data_df = df.iloc[data_start_row:].copy()
+                data_df.columns = headers
+                data_df = data_df.reset_index(drop=True)
+                logger.info(f"Extracted data from row {data_start_row}: {data_df.shape[0]} rows (original file had {len(df)} total rows)")
+                
+                # Log first and last data rows for validation
+                if len(data_df) > 0:
+                    first_row = data_df.iloc[0].tolist()
+                    last_row = data_df.iloc[-1].tolist()
+                    logger.info(f"First data row content: {first_row}")
+                    logger.info(f"Last data row content: {last_row}")
+                    # First should show EVENT_ID:0001, last should show EVENT_ID:0074 for pH control files
+            else:
+                logger.error(f"Data start row {data_start_row} is beyond file length {len(df)}")
+                return None
+            
+            # Get imputed timestamps
+            imputed_timestamps = analysis.get('imputed_timestamps', [])
+            if not imputed_timestamps:
+                logger.error("No imputed timestamps provided")
+                return None
+            
+            # ENHANCED DEBUG: Claude Analysis Validation
+            logger.info(f"🔍 CLAUDE ANALYSIS VALIDATION:")
+            logger.info(f"   📊 Original file length: {len(df)} rows")
+            logger.info(f"   📋 Extracted data length: {len(data_df)} rows")
+            logger.info(f"   🎯 Claude data_start_row: {analysis.get('data_start_row_index', 'None')}")
+            logger.info(f"   ✅ Corrected data_start_row: {data_start_row}")
+            logger.info(f"   ⏰ Imputed timestamps provided: {len(imputed_timestamps)}")
+            
+            # Validate row index range from Claude
+            if len(imputed_timestamps) > 0:
+                first_ts = imputed_timestamps[0]
+                last_ts = imputed_timestamps[-1]
+                first_row_idx = first_ts.get('row_index')
+                last_row_idx = last_ts.get('row_index')
+                
+                logger.info(f"   📍 Claude's first row_index: {first_row_idx}")
+                logger.info(f"   📍 Claude's last row_index: {last_row_idx}")
+                
+                if first_row_idx is not None and last_row_idx is not None:
+                    claude_row_span = last_row_idx - first_row_idx + 1
+                    logger.info(f"   📏 Claude's row span: {claude_row_span} rows ({first_row_idx} to {last_row_idx})")
+                    
+                    expected_span = len(data_df)
+                    if claude_row_span != expected_span:
+                        logger.warning(f"   ⚠️  MISMATCH: Claude span ({claude_row_span}) != extracted data ({expected_span})")
+                        logger.warning(f"   🔍 This could be the source of the missing EVENT_ID:0074!")
+                    
+                    # Check if Claude's range aligns with our corrected data range
+                    expected_first_idx = data_start_row
+                    expected_last_idx = data_start_row + len(data_df) - 1
+                    logger.info(f"   🎯 Expected row range: {expected_first_idx} to {expected_last_idx}")
+                    
+                    if first_row_idx != expected_first_idx:
+                        logger.warning(f"   ⚠️  First row mismatch: Claude={first_row_idx}, Expected={expected_first_idx}")
+                    if last_row_idx != expected_last_idx:
+                        logger.warning(f"   ⚠️  Last row mismatch: Claude={last_row_idx}, Expected={expected_last_idx}")
+            
+            # Create timestamp mapping - Claude's indices are absolute file positions
+            timestamp_map = {}
+            logger.info(f"🔗 TIMESTAMP MAPPING:")
+            
+            valid_mappings = 0
+            out_of_bounds_count = 0
+            
+            # Track all mapping attempts for detailed analysis
+            all_row_indices = []
+            problematic_entries = []
+            
+            for i, ts_entry in enumerate(imputed_timestamps):
+                row_index = ts_entry.get('row_index')
+                timestamp = ts_entry.get('timestamp')
+                all_row_indices.append(row_index)
+                
+                if row_index is not None and timestamp:
+                    # Adjust for data extraction: row_index - data_start_row
+                    adjusted_index = row_index - data_start_row
+                    
+                    # Enhanced debugging for boundary cases
+                    if 0 <= adjusted_index < len(data_df):
+                        timestamp_map[adjusted_index] = timestamp
+                        valid_mappings += 1
+                        
+                        # Log first, last, and around EVENT_ID:0074 area
+                        if (adjusted_index < 5 or 
+                            adjusted_index >= len(data_df) - 5 or 
+                            adjusted_index >= 70):  # Focus on rows near 74
+                            
+                            # Get actual data content for this row
+                            data_content = data_df.iloc[adjusted_index].tolist() if adjusted_index < len(data_df) else "N/A"
+                            logger.info(f"   ✅ Mapped row {row_index} -> adj_idx {adjusted_index} -> {timestamp[:19]} | Data: {data_content}")
+                    else:
+                        out_of_bounds_count += 1
+                        problematic_entries.append({
+                            'entry_num': i,
+                            'row_index': row_index,
+                            'adjusted_index': adjusted_index,
+                            'timestamp': timestamp,
+                            'data_length': len(data_df)
+                        })
+                        logger.warning(f"   ❌ OUT OF BOUNDS: row {row_index} -> adj_idx {adjusted_index} (data_len={len(data_df)})")
+                        
+                        # Special attention to entries that might be EVENT_ID:0074
+                        if i >= len(imputed_timestamps) - 3:
+                            logger.error(f"   🚨 CRITICAL: Last few entries are out of bounds! Entry {i}: row_index={row_index}, adj_idx={adjusted_index}")
+                else:
+                    logger.warning(f"   ⚠️  Invalid timestamp entry {i}: row_index={row_index}, timestamp={timestamp}")
+            
+            # Summary analysis
+            logger.info(f"📊 MAPPING ANALYSIS:")
+            logger.info(f"   ✅ Valid mappings: {valid_mappings}")
+            logger.info(f"   ❌ Out of bounds: {out_of_bounds_count}")
+            logger.info(f"   📏 Data frame length: {len(data_df)}")
+            logger.info(f"   📍 Row indices range: {min(all_row_indices)} to {max(all_row_indices)}")
+            
+            if problematic_entries:
+                logger.error(f"   🚨 PROBLEMATIC ENTRIES ({len(problematic_entries)}):")
+                for entry in problematic_entries:
+                    logger.error(f"      Entry {entry['entry_num']}: row {entry['row_index']} -> adj_idx {entry['adjusted_index']} (should be < {entry['data_length']})")
+            
+            # Check for missing coverage at the end
+            max_valid_index = max(timestamp_map.keys()) if timestamp_map else -1
+            expected_max_index = len(data_df) - 1
+            if max_valid_index < expected_max_index:
+                missing_end_rows = expected_max_index - max_valid_index
+                logger.error(f"   🚨 MISSING END ROWS: {missing_end_rows} rows at end not covered (max_mapped={max_valid_index}, expected_max={expected_max_index})")
+                logger.error(f"   🔍 This is likely where EVENT_ID:0074 is being lost!")
+            
+            # Apply timestamps to data
+            timestamps = []
+            missing_timestamp_count = 0
+            
+            for i in range(len(data_df)):
+                if i in timestamp_map:
+                    timestamps.append(timestamp_map[i])
+                else:
+                    # No timestamp for this row - this shouldn't happen with proper Claude analysis
+                    missing_timestamp_count += 1
+                    file_row = i + data_start_row
+                    logger.warning(f"No timestamp provided for data row {i} (file row {file_row})")
+                    # Log what's in this row for debugging
+                    if i < len(data_df):
+                        row_content = data_df.iloc[i].tolist()
+                        logger.warning(f"  Row content: {row_content}")
+                    timestamps.append(None)
+            
+            logger.info(f"Timestamp application: {len(timestamps)} total, {missing_timestamp_count} missing timestamps")
+            
+            # Add timestamp column
+            data_df['timestamp'] = timestamps
+            
+            # Convert to datetime
+            try:
+                data_df['timestamp'] = pd.to_datetime(data_df['timestamp'], errors='coerce')
+                # Filter out rows with invalid timestamps
+                valid_timestamp_mask = data_df['timestamp'].notna()
+                if valid_timestamp_mask.sum() == 0:
+                    logger.error("No valid imputed timestamps found after conversion")
+                    return None
+                elif valid_timestamp_mask.sum() < len(data_df):
+                    logger.warning(f"Removed {len(data_df) - valid_timestamp_mask.sum()} rows with invalid imputed timestamps")
+                    data_df = data_df[valid_timestamp_mask].reset_index(drop=True)
+                
+                logger.info("Successfully converted imputed timestamps to datetime")
+            except Exception as e:
+                logger.error(f"Failed to convert imputed timestamps: {e}")
+                return None
+            
+            # Add metadata
+            data_df['timestamp_source'] = 'imputed'
+            confidence_score = analysis.get('confidence_score', 0)
+            data_df['confidence_score'] = confidence_score
+            
+            if analysis.get('low_confidence_imputation', False):
+                logger.warning(f"Low confidence timestamp imputation (score: {confidence_score})")
+            
+            # Add file prefix to columns to prevent conflicts
+            data_df = self._add_file_prefix_to_columns(data_df, filename)
+            
+            logger.info(f"Imputed timestamps processed: {data_df.shape[0]} rows, {data_df.shape[1]} columns")
+            return data_df
+            
+        except Exception as e:
+            logger.error(f"Failed to process imputed timestamps: {e}")
+            return None
+    
+    def _process_event_based_data(self, df: pd.DataFrame, analysis: Dict[str, Any], filename: str) -> Optional[pd.DataFrame]:
+        """Process event-based files without timestamps"""
+        try:
+            # Apply structural information from analysis
+            data_start_row = analysis.get('data_start_row_index', 0)
+            variable_names_row = analysis.get('variable_names_row_index', 0)
+            
+            # Extract column headers
+            # Handle negative indices properly (negative means no headers)
+            if (variable_names_row is not None and 
+                variable_names_row >= 0 and 
+                variable_names_row < len(df)):
+                headers = df.iloc[variable_names_row].tolist()
+                logger.info(f"Extracted headers from row {variable_names_row}: {headers}")
+            else:
+                # Generate default headers
+                headers = [f'col_{i}' for i in range(df.shape[1])]
+                logger.warning(f"Generated default headers: {headers}")
+            
+            # Extract data starting from the specified row
+            if data_start_row < len(df):
+                data_df = df.iloc[data_start_row:].copy()
+                data_df.columns = headers
+                data_df = data_df.reset_index(drop=True)
+                logger.info(f"Extracted data from row {data_start_row}: {data_df.shape[0]} rows")
+            else:
+                logger.error(f"Data start row {data_start_row} is beyond file length {len(df)}")
+                return None
+            
+            # Add sequence-based ordering for event data
+            data_df['event_sequence'] = range(len(data_df))
+            
+            # Add metadata
+            data_df['timestamp_source'] = 'none'
+            
+            # Add file prefix to columns to prevent conflicts
+            data_df = self._add_file_prefix_to_columns(data_df, filename)
+            
+            logger.info(f"Event-based data processed: {data_df.shape[0]} rows, {data_df.shape[1]} columns")
+            return data_df
+            
+        except Exception as e:
+            logger.error(f"Failed to process event-based data: {e}")
             return None
 
 # Service factory function
